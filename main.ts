@@ -1,7 +1,7 @@
 // Token Radar, the token-radar-01 entry (Node 22, standard library only).
 //
 // The program reads the sealed DefiLlama snapshot from /input/snapshot.json (or --input
-// <snapshot.json|directory>), ranks every pre-token protocol with the radar-3 model in
+// <snapshot.json|directory>), ranks every pre-token protocol with the radar-4 model in
 // lib/model.ts, and writes the entry's output directory:
 //
 //   board.json      the ranked board: every watchlist protocol plus the early radar
