@@ -50,7 +50,7 @@ button { cursor: pointer; }
 .skip:focus { left: var(--s4); top: var(--s4); }
 .noscript { padding: var(--s5); text-align: center; color: var(--muted); }
 
-.wrap { max-width: 1280px; margin: 0 auto; padding: var(--s5) var(--s6) var(--s7); }
+.wrap { max-width: 1280px; margin: 0 auto; padding: var(--s4) var(--s6) var(--s7); }
 
 /* Header: radar mark, wordmark, snapshot meta. */
 .top {
@@ -75,17 +75,36 @@ button { cursor: pointer; }
 .top-meta span { white-space: nowrap; }
 
 /* Hero: the claim, then four facts. */
-.hero { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.6fr); gap: var(--s6); padding: var(--s6) 0 var(--s5); }
-.hero p { color: var(--muted); max-width: 64ch; margin-top: var(--s2); }
+.hero { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.6fr); gap: var(--s6); padding: var(--s4) 0 var(--s3); }
+.hero p { color: var(--muted); margin-top: var(--s2); }
 .hero p b { color: var(--ink); font-weight: 600; }
 .stats { display: grid; gap: var(--s2); align-content: start; border-left: 1px solid var(--line); padding-left: var(--s5); }
 .stat { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); }
 .stat b { font-family: var(--font-num); font-size: 15px; font-weight: 600; }
 .stat span { color: var(--muted); font-size: 13px; }
 
+/* Priced off the live market: category multiples beside the top-8 chart. */
+.market { display: grid; grid-template-columns: 1.05fr 1fr; gap: var(--s4); margin-bottom: var(--s4); }
+.market-col, .chart-box { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: var(--s4) var(--s5); }
+.market h2 { font-size: 17px; margin-bottom: var(--s1); }
+.mults { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: var(--s2); }
+.mult { display: flex; align-items: baseline; gap: var(--s2); background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 3px var(--s3); }
+.mult-cat { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
+.mult b { font-family: var(--font-num); font-size: 14px; font-weight: 600; }
+.mult-n { font-size: 11px; color: var(--muted); font-family: var(--font-num); }
+.chart-box h3 { margin-bottom: var(--s2); }
+.chart { display: grid; gap: 2px; }
+.chart-row { display: grid; grid-template-columns: 150px 1fr 74px; align-items: center; gap: 8px; min-height: 30px; }
+.chart-label { text-align: right; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart-track { min-width: 0; }
+.chart-bar { height: 14px; border-radius: 3px; background: #9db8ea; }
+.chart-bar.first { background: var(--accent); }
+.chart-value { font-size: 11px; font-family: var(--font-num); }
+
 /* Model panel: the formula and what each factor means. */
 .model { margin-bottom: var(--s4); padding: var(--s5); display: grid; gap: var(--s3); }
 .model h2 { font-size: 17px; }
+.model-points { grid-template-columns: 1fr 1fr; gap: var(--s2) var(--s6); }
 .formula {
   font-family: var(--font-num); font-size: 13px; line-height: 1.7; color: var(--muted);
   background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-sm);
@@ -96,7 +115,7 @@ button { cursor: pointer; }
 .fine { color: var(--muted); font-size: 13px; }
 
 /* Controls: search, two filters, watchlist toggle, token-status tabs, count. */
-.controls { display: flex; flex-wrap: wrap; align-items: end; gap: var(--s3); padding: var(--s4) 0; border-top: 1px solid var(--line); }
+.controls { display: flex; flex-wrap: wrap; align-items: end; gap: var(--s3); padding: var(--s3) 0; border-top: 1px solid var(--line); }
 .field { display: grid; gap: var(--s1); }
 .field label, .field .lbl { color: var(--muted); font-size: 12px; }
 .field input, .field select {
@@ -180,6 +199,8 @@ tbody tr[data-open="true"] { background: var(--accent-soft); }
   .wrap { padding: var(--s4); }
   .hero { grid-template-columns: 1fr; gap: var(--s4); }
   .stats { border-left: 0; border-top: 1px solid var(--line); padding-left: 0; padding-top: var(--s4); }
+  .market { grid-template-columns: 1fr; }
+  .model-points { grid-template-columns: 1fr; }
   .field input { min-width: 0; width: 100%; }
   .count { margin-left: 0; }
 }
