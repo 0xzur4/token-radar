@@ -1,4 +1,32 @@
-// Token Radar's value model (radar-4): a sealed DefiLlama snapshot in, a ranked board out.
+// Token Radar's value model (radar-5): a sealed DefiLlama snapshot in, a ranked board out.
+//
+// radar-5 changes two things about radar-4, and nothing else about the fit:
+//   1. The launch curve is fitted robustly (Huber IRLS, c = 1.345, MAD scale) instead of
+//      by plain least squares. The live set's market-cap-to-TVL ratios are heavy-tailed —
+//      a handful of protocols sit 100x or more off the curve (a token worth far more, or
+//      far less, than its TVL suggests) — and least squares lets those few protocols drag
+//      the whole curve. The robust fit downweights them instead of deleting them: no
+//      protocol is ever special-cased or thrown out by hand.
+//   2. A category's median residual is shrunk harder toward the curve, n/(n+10) instead
+//      of n/(n+3). With 119 live protocols spread over 36 categories, most categories
+//      have one or two live protocols, and a single protocol's residual is mostly its own
+//      noise, not its category's market. radar-4 let one outlier set a whole category's
+//      tilt (the top board row's +0.71 dex came from a single live protocol sitting
+//      +2.82 dex off the curve); radar-5 does not.
+//
+// What radar-5 does NOT claim: the fit is still weak, and the honest numbers say so.
+// On the same 119 live protocols, leave-one-out median absolute error is 83.6% (radar-4:
+// 84.5%), the 75th percentile 231% (239%), the blind backtest 86.0% (86.5%), R² 0.14.
+// Those differences are inside the paired-bootstrap 95% interval (about ±4 points), so
+// radar-5 is a robustness fix, not a breakthrough: the residual spread around the curve
+// is ~0.9 dex (a factor of eight), and no field in the snapshot explains any of it —
+// 7-day growth, age and chain count each correlate under 0.1 with the residuals, there is
+// no curvature in log(mcap) against log(TVL), and a larger live set (600 protocols from
+// DefiLlama's live API) shows the same structure and does not transfer better to this
+// snapshot. The remaining error is the market's own noise — tokenomics, float, timing and
+// narrative — none of which the snapshot records. The growth, maturity and breadth tilts
+// are kept as stated judgment, not as fitted effects: the live set gives no evidence for
+// them, and none against them either, for a launch value rather than a traded one.
 //
 // The board ranks every protocol in the snapshot that records no token and is not a centralised
 // exchange or a versioned pool of another protocol. The snapshot's own watchlist (40 protocols at
@@ -13,17 +41,17 @@
 // and no symbol. That is what the snapshot says; it is not proof the protocol has no token.
 //
 // Implied value follows only from the snapshot's own figures, through a curve the snapshot's
-// own live tokens fit at run time. The market's launch curve is an ordinary-least-squares fit
-// of log10(market cap) on log10(TVL) over the snapshot's live-token protocols (centralised
+// own live tokens fit at run time. The market's launch curve is a robust (Huber) fit of
+// log10(market cap) on log10(TVL) over the snapshot's live-token protocols (centralised
 // exchanges left out: an exchange's token is not a launch). Each category then tilts the curve
 // by the shrunk median of its own live protocols' residuals from that curve — shrunk by
-// n/(n+3), so a category with one live protocol leans on the curve and a category with fifteen
+// n/(n+10), so a category with one live protocol leans on the curve and a category with fifteen
 // leans on its own market. A launch is worth the fitted multiple of its TVL at its own size,
 // tilted by how its seven-day growth compares with its own category's median growth, by how
 // long it has run with no token, and by how many chains it reaches:
 //
 //   fit        log10(mcap) = a + b x log10(tvl), fitted at run time over the live set
-//   adjustment = median residual of the category's live protocols, shrunk by n/(n+3)
+//   adjustment = median residual of the category's live protocols, shrunk by n/(n+10)
 //   fitted x   = 10^(a + (b - 1) x log10(tvl) + adjustment); the multiple the curve
 //                implies at this protocol's TVL, in this category
 //   base       = tvl_usd x fitted multiple
@@ -115,8 +143,8 @@ export const MODEL: ModelConstants = {
   multiple_min_live: 3,
 };
 
-/** The curve's shrinkage: a category's median residual is weighted n/(n+3). */
-export const FIT_SHRINK_K = 3;
+/** The curve's shrinkage: a category's median residual is weighted n/(n+10). */
+export const FIT_SHRINK_K = 10;
 
 /** The net-verdict bands, on the breakeven share of the launch value. */
 export const VERDICT_BANDS = [
@@ -126,7 +154,7 @@ export const VERDICT_BANDS = [
 ];
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** The most early rows the board carries; the snapshot holds fewer, so the cap never binds. */
 export const EARLY_LIMIT = 200;
@@ -399,6 +427,47 @@ export function olsFit(xs: number[], ys: number[]): [number, number] {
   return [my - slope * mx, slope];
 }
 
+/**
+ * A Huber robust fit of y on x with an intercept: [intercept, slope]. Iteratively
+ * reweighted least squares (Tukey's constant c = 1.345, scale from the median absolute
+ * deviation), starting from the least-squares fit and stopping when the coefficients
+ * stop moving or after 50 rounds. Deterministic: no clock, no randomness, the same
+ * inputs always give the same line. A protocol hundreds of times off the curve gets
+ * downweighted to a fraction of a point's weight instead of dragging the slope; a
+ * protocol on the curve keeps full weight.
+ */
+export function huberFit(xs: number[], ys: number[]): [number, number] {
+  const n = xs.length;
+  let [a, b] = olsFit(xs, ys);
+  for (let round = 0; round < 50; round++) {
+    const resid = ys.map((y, i) => y - (a + b * xs[i]!));
+    const med = median(resid);
+    const scale = 1.4826 * median(resid.map((r) => Math.abs(r - med))) + 1e-9;
+    const ws = resid.map((r) => Math.min(1, (1.345 * scale) / Math.max(Math.abs(r), 1e-9)));
+    let sw = 0;
+    let swx = 0;
+    let swy = 0;
+    let swxx = 0;
+    let swxy = 0;
+    for (let i = 0; i < n; i++) {
+      const w = ws[i]!;
+      sw += w;
+      swx += w * xs[i]!;
+      swy += w * ys[i]!;
+      swxx += w * xs[i]! * xs[i]!;
+      swxy += w * xs[i]! * ys[i]!;
+    }
+    const denom = sw * swxx - swx * swx;
+    const b2 = denom === 0 ? b : (sw * swxy - swx * swy) / denom;
+    const a2 = sw === 0 ? a : (swy - b2 * swx) / sw;
+    const moved = Math.max(Math.abs(a2 - a), Math.abs(b2 - b));
+    a = a2;
+    b = b2;
+    if (moved < 1e-10) break;
+  }
+  return [a, b];
+}
+
 /** The live-token protocols the curve is fitted on: a token that trades, a TVL, no CEX. */
 export function fitSet(snapshot: Snapshot): SnapshotProtocol[] {
   return snapshot.protocols.filter(
@@ -407,15 +476,16 @@ export function fitSet(snapshot: Snapshot): SnapshotProtocol[] {
 }
 
 /**
- * The launch curve, fitted at run time: OLS of log10(market cap) on log10(TVL) over the
- * snapshot's live-token protocols, plus each category's median residual from that line,
- * shrunk by n/(n+3) toward the curve. A category with no live protocol gets no adjustment.
+ * The launch curve, fitted at run time: a Huber robust fit of log10(market cap) on
+ * log10(TVL) over the snapshot's live-token protocols, plus each category's median
+ * residual from that line, shrunk by n/(n+10) toward the curve. A category with no live
+ * protocol gets no adjustment.
  */
 export function fitLaunchCurve(snapshot: Snapshot): LaunchFit {
   const live = fitSet(snapshot);
   const xs = live.map((p) => Math.log10(p.tvl_usd));
   const ys = live.map((p) => Math.log10(p.mcap_usd!));
-  const [intercept, slope] = olsFit(xs, ys);
+  const [intercept, slope] = huberFit(xs, ys);
   const meanY = ys.reduce((a, b) => a + b, 0) / Math.max(1, ys.length);
   let sst = 0;
   let sse = 0;
@@ -464,7 +534,7 @@ export function fittedMultipleFor(protocol: SnapshotProtocol, fit: LaunchFit): {
 
 /**
  * The curve's leave-one-out test: each live protocol held out once, the curve refitted
- * without it (line and category residuals), then predicted. Also the same test for the
+ * without it (robust line and category residuals), then predicted. Also the same test for the
  * radar-3 category-median model, on the same live set, so the reader sees what the fit
  * bought. Returns median and 75th-percentile absolute percentage errors, and the 25th and
  * 75th percentiles of the leave-one-out log residuals, which bound the P25-P75 ranges.
@@ -479,7 +549,7 @@ export function validateFit(snapshot: Snapshot): FitValidation {
     const train = live.filter((_, i) => i !== h);
     const xs = train.map((p) => Math.log10(p.tvl_usd));
     const ys = train.map((p) => Math.log10(p.mcap_usd!));
-    const [a, b] = olsFit(xs, ys);
+    const [a, b] = huberFit(xs, ys);
     const byCategory = new Map<string, number[]>();
     train.forEach((p, i) => {
       const r = ys[i]! - (a + b * xs[i]!);
@@ -533,7 +603,7 @@ export function backtestFit(snapshot: Snapshot): { mdape_pct: number; n: number 
   if (train.length < 10 || test.length === 0) return { mdape_pct: 0, n: test.length };
   const xs = train.map((p) => Math.log10(p.tvl_usd));
   const ys = train.map((p) => Math.log10(p.mcap_usd!));
-  const [a, b] = olsFit(xs, ys);
+  const [a, b] = huberFit(xs, ys);
   const byCategory = new Map<string, number[]>();
   train.forEach((p, i) => {
     const r = ys[i]! - (a + b * xs[i]!);

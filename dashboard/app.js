@@ -286,7 +286,7 @@
       el('p', { class: 'fine', text: 'fitted(tvl, cat) = 10^(log mcap = ' + fit.intercept.toFixed(2) + ' + ' + fit.slope.toFixed(2) + ' log TVL + category tilt), fitted at run time on the ' + fit.n + ' live-token protocols in this snapshot. A launch is not worth a flat multiple of TVL: the market pays large protocols less per dollar locked than small ones, and the curve says by how much.' }),
       el('ul', { class: 'model-points' },
         el('li', null, el('b', { text: 'Fitted launch curve. ' }), 'Log market cap on log TVL over the live tokens, so a $3B protocol is priced at the multiple the market actually pays at $3B, not at the multiple it pays at $30M.'),
-        el('li', null, el('b', { text: 'Category tilt. ' }), 'Each category\u2019s median residual from the curve, shrunk by n/(n+3): a category with one live protocol leans on the curve, one with fifteen leans on its own market.'),
+        el('li', null, el('b', { text: 'Category tilt. ' }), 'Each category\u2019s median residual from the curve, shrunk by n/(n+10): a category with one live protocol leans on the curve, one with fifteen leans on its own market.'),
         el('li', null, el('b', { text: 'Tested, not asserted. ' }), 'Leave-one-out error ' + val.loo_mdape_pct.toFixed(1) + '% (median), blind backtest ' + val.backtest_mdape_pct.toFixed(1) + '% on ' + val.backtest_n + ' unseen protocols, against ' + val.radar3_loo_mdape_pct.toFixed(1) + '% for the old flat category multiples on the same test. The curve is better, and the gap is honest: launch values are hard to price, and the P25\u2013P75 range on every row says so.'),
         el('li', null, el('b', { text: 'Relative growth. ' }), 'Seven-day TVL change against the category\u2019s own median, so share gained in a falling week still counts.'),
         el('li', null, el('b', { text: 'Waiting time. ' }), 'Age with no token is launch value the market has already waited for; three years counts more than three months.'),
@@ -294,10 +294,10 @@
         el('li', null, el('b', { text: 'Net verdict. ' }), 'Every farm plan prices its own fees (bridge plus gas for setup, a weekly transaction and the exit) against the implied value, and says what share of the launch the airdrop must hand you to cover them.')
       ),
       el('h3', { text: 'Category medians, for reference' }),
-      el('p', { class: 'fine', text: 'Median market-cap-to-TVL of each category\u2019s own live protocols (at least three of them). The radar-3 model priced every row at these; radar-4 keeps them only as the comparison the validation beats.' }),
+      el('p', { class: 'fine', text: 'Median market-cap-to-TVL of each category\u2019s own live protocols (at least three of them). The radar-3 model priced every row at these; radar-5 keeps them only as the comparison the validation beats.' }),
       el('div', { class: 'mults' }, chips),
       el('h3', { text: 'Biggest category tilts' }),
-      el('p', { class: 'fine', text: 'Log-point adjustments to the curve, shrunk by n/(n+3): a category with one live protocol leans on the curve, one with fifteen leans on its own market.' }),
+      el('p', { class: 'fine', text: 'Log-point adjustments to the curve, shrunk by n/(n+10): a category with one live protocol leans on the curve, one with fifteen leans on its own market.' }),
       el('div', { class: 'tilt-row' }, tiltChips),
       topChart(),
       el('p', { class: 'fine', text: 'One function scores every row; no protocol name is special-cased. The curve, the tilts and the validation are computed from this snapshot\u2019s live protocols at run time, never written in by hand. Missing seven-day growth counts as the category median, and a missing listing date counts as 365 days.' })

@@ -6,6 +6,10 @@
 
 Token Radar ranks every pre-token protocol in the sealed DefiLlama snapshot by implied launch value, and gives each one a concrete farm plan. Built by an AI agent for make.fun's “Build the best token launch radar” bounty, $1,325 in USDC.
 
+## Model
+
+radar-5: a Huber robust fit of log10(market cap) on log10(TVL) over the snapshot's 119 live-token protocols, plus each category's shrunk median residual (n/(n+10)), then tilts for relative 7-day growth, age with no token, and chain breadth. Honest out-of-sample numbers on the same live set: leave-one-out median error 83.6%, 75th percentile 231%, blind backtest 86.0%, fit R² 0.14. The full before/after against radar-4, what was tried and what did not help, and the recommendation are in [VALIDATION.md](VALIDATION.md). The short version: the fit is weak and the remaining error is mostly the market's own noise, not something the snapshot's ten fields can explain — a row's P25–P75 range is roughly a factor of three either way.
+
 ## Run it
 
 ```sh
