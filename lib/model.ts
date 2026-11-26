@@ -307,7 +307,8 @@ export function median(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+  if (sorted.length % 2 === 1) return sorted[mid]!;
+  return (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
 
 /**
@@ -426,21 +427,35 @@ function averageRanks(values: number[]): number[] {
 export function spearmanRank(xs: number[], ys: number[]): number {
   const n = Math.min(xs.length, ys.length);
   if (n < 2) return 0;
-  const rx = averageRanks(xs.slice(0, n));
-  const ry = averageRanks(ys.slice(0, n));
-  const mean = (n + 1) / 2;
+  const rankOf = (values: number[]): number[] => {
+    const order = values.map((v, i) => ({ v, i })).sort((a, b) => a.v - b.v);
+    const out = new Array<number>(values.length).fill(0);
+    let i = 0;
+    while (i < order.length) {
+      let j = i;
+      while (j + 1 < order.length && order[j + 1]!.v === order[i]!.v) j++;
+      const avg = (i + j) / 2 + 1;
+      for (let k = i; k <= j; k++) out[order[k]!.i] = avg;
+      i = j + 1;
+    }
+    return out;
+  };
+  const rx = rankOf(xs.slice(0, n));
+  const ry = rankOf(ys.slice(0, n));
+  const mx = rx.reduce((a, b) => a + b, 0) / n;
+  const my = ry.reduce((a, b) => a + b, 0) / n;
+  let sxy = 0;
   let sxx = 0;
   let syy = 0;
-  let sxy = 0;
   for (let i = 0; i < n; i++) {
-    const dx = rx[i]! - mean;
-    const dy = ry[i]! - mean;
+    const dx = rx[i]! - mx;
+    const dy = ry[i]! - my;
+    sxy += dx * dy;
     sxx += dx * dx;
     syy += dy * dy;
-    sxy += dx * dy;
   }
-  if (!(sxx > 0 && syy > 0)) return 0;
-  return Math.max(-1, Math.min(1, sxy / Math.sqrt(sxx * syy)));
+  if (sxx === 0 || syy === 0) return 0;
+  return sxy / Math.sqrt(sxx * syy);
 }
 
 /** The q-th quantile of a list of numbers (linear interpolation on the sorted list). */
@@ -459,22 +474,24 @@ export function olsFit(xs: number[], ys: number[]): [number, number] {
   const n = Math.min(xs.length, ys.length);
   if (n === 0) return [0, 0];
   if (n === 1) return [ys[0]!, 0];
-  let sx = 0;
-  let sy = 0;
+  let sumX = 0;
+  let sumY = 0;
   for (let i = 0; i < n; i++) {
-    sx += xs[i]!;
-    sy += ys[i]!;
+    sumX += xs[i]!;
+    sumY += ys[i]!;
   }
-  const mx = sx / n;
-  const my = sy / n;
+  const meanX = sumX / n;
+  const meanY = sumY / n;
   let sxx = 0;
   let sxy = 0;
   for (let i = 0; i < n; i++) {
-    sxx += (xs[i]! - mx) ** 2;
-    sxy += (xs[i]! - mx) * (ys[i]! - my);
+    const dx = xs[i]! - meanX;
+    sxx += dx * dx;
+    sxy += dx * (ys[i]! - meanY);
   }
-  const slope = sxx === 0 ? 0 : sxy / sxx;
-  return [my - slope * mx, slope];
+  if (sxx === 0) return [meanY, 0];
+  const slope = sxy / sxx;
+  return [meanY - slope * meanX, slope];
 }
 
 /**
@@ -490,36 +507,54 @@ export function huberFit(xs: number[], ys: number[]): [number, number] {
   const n = Math.min(xs.length, ys.length);
   if (n === 0) return [0, 0];
   if (n === 1) return [ys[0]!, 0];
-  const xv = xs.slice(0, n);
-  const yv = ys.slice(0, n);
-  let [a, b] = olsFit(xv, yv);
-  for (let round = 0; round < 50; round++) {
-    const resid = yv.map((y, i) => y - (a + b * xv[i]!));
-    const med = median(resid);
-    const scale = 1.4826 * median(resid.map((r) => Math.abs(r - med))) + 1e-9;
-    const ws = resid.map((r) => Math.min(1, (1.345 * scale) / Math.max(Math.abs(r), 1e-9)));
-    let sw = 0;
-    let swx = 0;
-    let swy = 0;
-    let swxx = 0;
-    let swxy = 0;
+  let [intercept, slope] = olsFit(xs, ys);
+  const tune = 1.345;
+  for (let round = 0; round < 60; round++) {
+    const residuals: number[] = [];
+    for (let i = 0; i < n; i++) residuals.push(ys[i]! - (intercept + slope * xs[i]!));
+    // Robust scale: 1.4826 * MAD of residuals about their median. The
+    // median-centred MAD (not median |r|) is what keeps the fit honest.
+    const center = median(residuals);
+    const rawScale = 1.4826 * median(residuals.map((r) => Math.abs(r - center)));
+    const safeScale = rawScale > 1e-9 ? rawScale : 1e-9;
+    const cutoff = tune * safeScale;
+    const weights = residuals.map((r) => {
+      const a = Math.abs(r);
+      return a <= cutoff ? 1 : cutoff / a;
+    });
+    let wsum = 0;
+    let wx = 0;
+    let wy = 0;
     for (let i = 0; i < n; i++) {
-      const w = ws[i]!;
-      sw += w;
-      swx += w * xv[i]!;
-      swy += w * yv[i]!;
-      swxx += w * xv[i]! * xv[i]!;
-      swxy += w * xv[i]! * yv[i]!;
+      wsum += weights[i]!;
+      wx += weights[i]! * xs[i]!;
+      wy += weights[i]! * ys[i]!;
     }
-    const denom = sw * swxx - swx * swx;
-    const b2 = denom === 0 ? b : (sw * swxy - swx * swy) / denom;
-    const a2 = sw === 0 ? a : (swy - b2 * swx) / sw;
-    const moved = Math.max(Math.abs(a2 - a), Math.abs(b2 - b));
-    a = a2;
-    b = b2;
-    if (moved < 1e-10) break;
+    if (wsum === 0) break;
+    const mx = wx / wsum;
+    const my = wy / wsum;
+    let sxx = 0;
+    let sxy = 0;
+    for (let i = 0; i < n; i++) {
+      const dx = xs[i]! - mx;
+      sxx += weights[i]! * dx * dx;
+      sxy += weights[i]! * dx * (ys[i]! - my);
+    }
+    let nextIntercept: number;
+    let nextSlope: number;
+    if (sxx === 0) {
+      nextIntercept = my;
+      nextSlope = 0;
+    } else {
+      nextSlope = sxy / sxx;
+      nextIntercept = my - nextSlope * mx;
+    }
+    const done = Math.abs(nextIntercept - intercept) < 1e-10 && Math.abs(nextSlope - slope) < 1e-10;
+    intercept = nextIntercept;
+    slope = nextSlope;
+    if (done) break;
   }
-  return [a, b];
+  return [intercept, slope];
 }
 
 /** The live-token protocols the curve is fitted on: a token that trades, a TVL, no CEX. */
@@ -938,32 +973,50 @@ const LOW_FEE_CHAINS = new Set([
 
 /** One transaction's gas cost in dollars on `chain`. */
 export function chainGasUsd(chain: string): number {
-  const c = chain.trim().toLowerCase();
-  if (c === 'solana') return 0.1;
-  if (c === 'ethereum') return 5;
-  if (LOW_FEE_CHAINS.has(c)) return 1;
+  if (chain === 'Solana') return 0.1;
+  if (chain === 'Ethereum') return 5;
+  const lowFee = new Set([
+    'Arbitrum', 'Base', 'Optimism', 'Polygon', 'Scroll', 'Ink', 'Unichain',
+    'Monad', 'Katana', 'Corn', 'Robinhood Chain', 'zkSync Era',
+    'Starknet', 'Linea', 'Blast', 'Mode', 'Zora', 'Mantle',
+    'opBNB', 'Celo', 'Gnosis', 'Fantom', 'Avalanche', 'BSC',
+    'Sui', 'Aptos', 'Near', 'Sei', 'Injective', 'Osmosis', 'Berachain',
+    'Sonic', 'HyperEVM', 'MegaETH', 'Abstract', 'Soneium', 'World Chain',
+    'Binance', 'Plasma', 'TON',
+  ]);
+  if (lowFee.has(chain)) return 1;
   return 2;
 }
 
 /** The bridge cost in dollars onto `chain`. */
 export function chainBridgeUsd(chain: string): number {
-  const c = chain.trim().toLowerCase();
-  if (c === 'solana') return 1;
-  if (c === 'ethereum') return 12;
-  if (LOW_FEE_CHAINS.has(c)) return 2;
+  if (chain === 'Solana') return 1;
+  if (chain === 'Ethereum') return 12;
+  const lowFee = new Set([
+    'Arbitrum', 'Base', 'Optimism', 'Polygon', 'Scroll', 'Ink', 'Unichain',
+    'Monad', 'Katana', 'Corn', 'Robinhood Chain', 'zkSync Era',
+    'Starknet', 'Linea', 'Blast', 'Mode', 'Zora', 'Mantle',
+    'opBNB', 'Celo', 'Gnosis', 'Fantom', 'Avalanche', 'BSC',
+    'Sui', 'Aptos', 'Near', 'Sei', 'Injective', 'Osmosis', 'Berachain',
+    'Sonic', 'HyperEVM', 'MegaETH', 'Abstract', 'Soneium', 'World Chain',
+    'Binance', 'Plasma', 'TON',
+  ]);
+  if (lowFee.has(chain)) return 2;
   return 3;
 }
 
 /** Pick the chain in `p.chains` minimizing bridge + 6x gas (stable order on ties), or 'its main chain'. */
-export function farmChain(p: SnapshotProtocol): string {
-  if (p.chains.length === 0) return 'its main chain';
-  let best = p.chains[0]!;
-  let bestCost = chainBridgeUsd(best) + chainGasUsd(best) * 6;
-  for (let i = 1; i < p.chains.length; i++) {
-    const c = p.chains[i]!;
-    const cost = chainBridgeUsd(c) + chainGasUsd(c) * 6;
+export function farmChain(protocol: SnapshotProtocol): string {
+  // Cheapest chain wins; ties keep the first chain listed, so the
+  // protocol's own chain order is the tie-breaker, not the alphabet.
+  const chains = protocol.chains ?? [];
+  if (chains.length === 0) return 'its main chain';
+  let best = chains[0]!;
+  let bestCost = chainGasUsd(best) + chainBridgeUsd(best);
+  for (const chain of chains) {
+    const cost = chainGasUsd(chain) + chainBridgeUsd(chain);
     if (cost < bestCost) {
-      best = c;
+      best = chain;
       bestCost = cost;
     }
   }
@@ -984,8 +1037,8 @@ function gasNote(p: SnapshotProtocol): string {
 }
 
 /** One transaction's cost in dollars on the protocol's selected farm chain. */
-export function gasUsd(p: SnapshotProtocol): number {
-  return chainGasUsd(farmChain(p));
+export function gasUsd(protocol: SnapshotProtocol): number {
+  return chainGasUsd(farmChain(protocol));
 }
 
 /** What bridging funds onto the protocol's selected farm chain costs. */
@@ -995,8 +1048,8 @@ function bridgeNote(p: SnapshotProtocol): string {
 }
 
 /** The bridge cost in dollars onto the protocol's selected farm chain. */
-export function bridgeUsd(p: SnapshotProtocol): number {
-  return chainBridgeUsd(farmChain(p));
+export function bridgeUsd(protocol: SnapshotProtocol): number {
+  return chainBridgeUsd(farmChain(protocol));
 }
 
 /**
