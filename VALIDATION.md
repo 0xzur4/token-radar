@@ -26,9 +26,16 @@ improvement.
 LOO = leave-one-out: each live protocol held out once, the curve refitted without
 it (line and category residuals), then predicted. Backtest = live set split in half
 by slug (even indices train, odd indices test), fitted on one half and scored on
-the other. Spearman is new in radar-6: it measures how well the model's *ranking*
-of live protocols matches their actual mcap ranking — 0.376 is weak, which is the
-same story as the 84% median error told from the other side.
+the other. `loo_spearman` is computed directly at run time in `validateFit()` via
+`spearmanRank()` on the LOO predictions vs actual market caps: 0.376 is weak,
+which is the same story as the 84% median error told from the other side.
+
+For farm execution, `farmChain()` selects each protocol's lowest-fee supported
+chain (`chainBridgeUsd + 6 * chainGasUsd`, stable tie-break) instead of blindly
+defaulting to `chains[0]`, routes the second leg to the cheapest other chain, and
+adapts Step 1 for bridge/cross-chain protocols so they do not double-bridge. The
+test suite runs offline with `node --test test/model.test.ts`, and dashboard
+screenshots can be regenerated reproducibly via `scripts/capture-screenshots.ts`.
 
 ## The R² 0.23 lead — resolved: composition, not data quality
 

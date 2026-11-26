@@ -200,6 +200,7 @@ export interface BoardRow {
     age_days: number | null;
     range_low_usd: number;
     range_high_usd: number;
+    farm_chain: string;
     total_fees_usd: number;
     breakeven_share: number;
     net_verdict: string;
@@ -232,6 +233,7 @@ export interface RadarRow {
   breadth_multiplier: number;
   range_low_usd: number;
   range_high_usd: number;
+  farm_chain: string;
   total_fees_usd: number;
   breakeven_share: number;
   net_verdict: string;
@@ -300,8 +302,9 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((end - start) / DAY_MS));
 }
 
-/** The median of a non-empty list of numbers. */
+/** The median of a list of numbers, or 0 when empty. */
 export function median(values: number[]): number {
+  if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
@@ -394,11 +397,50 @@ export interface LaunchFit {
 export interface FitValidation {
   loo_mdape_pct: number;
   loo_p75_ape_pct: number;
+  loo_spearman: number;
   resid_p25: number;
   resid_p75: number;
   backtest_mdape_pct: number;
   backtest_n: number;
   radar3_loo_mdape_pct: number;
+}
+
+/** Average 1-based ranks for a numeric vector, assigning mid-ranks to ties. */
+function averageRanks(values: number[]): number[] {
+  const n = values.length;
+  const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => values[a]! - values[b]! || a - b);
+  const ranks = new Array<number>(n);
+  let i = 0;
+  while (i < n) {
+    let j = i + 1;
+    const v = values[order[i]!]!;
+    while (j < n && values[order[j]!] === v) j++;
+    const avgRank = (i + 1 + j) / 2;
+    for (let k = i; k < j; k++) ranks[order[k]!] = avgRank;
+    i = j;
+  }
+  return ranks;
+}
+
+/** Spearman rank correlation between `xs` and `ys` using average ranks for ties (0 if n < 2 or zero variance). */
+export function spearmanRank(xs: number[], ys: number[]): number {
+  const n = Math.min(xs.length, ys.length);
+  if (n < 2) return 0;
+  const rx = averageRanks(xs.slice(0, n));
+  const ry = averageRanks(ys.slice(0, n));
+  const mean = (n + 1) / 2;
+  let sxx = 0;
+  let syy = 0;
+  let sxy = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = rx[i]! - mean;
+    const dy = ry[i]! - mean;
+    sxx += dx * dx;
+    syy += dy * dy;
+    sxy += dx * dy;
+  }
+  if (!(sxx > 0 && syy > 0)) return 0;
+  return Math.max(-1, Math.min(1, sxy / Math.sqrt(sxx * syy)));
 }
 
 /** The q-th quantile of a list of numbers (linear interpolation on the sorted list). */
@@ -414,9 +456,17 @@ export function quantile(values: number[], q: number): number {
 
 /** Ordinary least squares of y on x with an intercept: [intercept, slope]. */
 export function olsFit(xs: number[], ys: number[]): [number, number] {
-  const n = xs.length;
-  const mx = xs.reduce((a, b) => a + b, 0) / n;
-  const my = ys.reduce((a, b) => a + b, 0) / n;
+  const n = Math.min(xs.length, ys.length);
+  if (n === 0) return [0, 0];
+  if (n === 1) return [ys[0]!, 0];
+  let sx = 0;
+  let sy = 0;
+  for (let i = 0; i < n; i++) {
+    sx += xs[i]!;
+    sy += ys[i]!;
+  }
+  const mx = sx / n;
+  const my = sy / n;
   let sxx = 0;
   let sxy = 0;
   for (let i = 0; i < n; i++) {
@@ -437,10 +487,14 @@ export function olsFit(xs: number[], ys: number[]): [number, number] {
  * protocol on the curve keeps full weight.
  */
 export function huberFit(xs: number[], ys: number[]): [number, number] {
-  const n = xs.length;
-  let [a, b] = olsFit(xs, ys);
+  const n = Math.min(xs.length, ys.length);
+  if (n === 0) return [0, 0];
+  if (n === 1) return [ys[0]!, 0];
+  const xv = xs.slice(0, n);
+  const yv = ys.slice(0, n);
+  let [a, b] = olsFit(xv, yv);
   for (let round = 0; round < 50; round++) {
-    const resid = ys.map((y, i) => y - (a + b * xs[i]!));
+    const resid = yv.map((y, i) => y - (a + b * xv[i]!));
     const med = median(resid);
     const scale = 1.4826 * median(resid.map((r) => Math.abs(r - med))) + 1e-9;
     const ws = resid.map((r) => Math.min(1, (1.345 * scale) / Math.max(Math.abs(r), 1e-9)));
@@ -452,10 +506,10 @@ export function huberFit(xs: number[], ys: number[]): [number, number] {
     for (let i = 0; i < n; i++) {
       const w = ws[i]!;
       sw += w;
-      swx += w * xs[i]!;
-      swy += w * ys[i]!;
-      swxx += w * xs[i]! * xs[i]!;
-      swxy += w * xs[i]! * ys[i]!;
+      swx += w * xv[i]!;
+      swy += w * yv[i]!;
+      swxx += w * xv[i]! * xv[i]!;
+      swxy += w * xv[i]! * yv[i]!;
     }
     const denom = sw * swxx - swx * swx;
     const b2 = denom === 0 ? b : (sw * swxy - swx * swy) / denom;
@@ -483,10 +537,13 @@ export function fitSet(snapshot: Snapshot): SnapshotProtocol[] {
  */
 export function fitLaunchCurve(snapshot: Snapshot): LaunchFit {
   const live = fitSet(snapshot);
+  if (live.length === 0) {
+    return { intercept: 0, slope: 0, r2: 0, n: 0, categories: [], points: [] };
+  }
   const xs = live.map((p) => Math.log10(p.tvl_usd));
   const ys = live.map((p) => Math.log10(p.mcap_usd!));
   const [intercept, slope] = huberFit(xs, ys);
-  const meanY = ys.reduce((a, b) => a + b, 0) / Math.max(1, ys.length);
+  const meanY = ys.reduce((a, b) => a + b, 0) / ys.length;
   let sst = 0;
   let sse = 0;
   for (let i = 0; i < ys.length; i++) {
@@ -508,7 +565,7 @@ export function fitLaunchCurve(snapshot: Snapshot): LaunchFit {
     const m = median(values);
     categories.push({ category, n: values.length, median_residual: round4(m), adjustment: round4(m * (values.length / (values.length + FIT_SHRINK_K))) });
   }
-  categories.sort((a, b) => b.adjustment - a.adjustment || (a.category < b.category ? -1 : 1));
+  categories.sort((a, b) => b.adjustment - a.adjustment || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
   const points: FitPoint[] = live
     .map((p) => ({
       slug: p.slug,
@@ -541,9 +598,23 @@ export function fittedMultipleFor(protocol: SnapshotProtocol, fit: LaunchFit): {
  */
 export function validateFit(snapshot: Snapshot): FitValidation {
   const live = fitSet(snapshot);
+  if (live.length < 2) {
+    return {
+      loo_mdape_pct: 0,
+      loo_p75_ape_pct: 0,
+      loo_spearman: 0,
+      resid_p25: 0,
+      resid_p75: 0,
+      backtest_mdape_pct: 0,
+      backtest_n: 0,
+      radar3_loo_mdape_pct: 0,
+    };
+  }
   const apes: number[] = [];
   const logResiduals: number[] = [];
   const radar3Apes: number[] = [];
+  const preds: number[] = [];
+  const actuals: number[] = [];
   for (let h = 0; h < live.length; h++) {
     const held = live[h]!;
     const train = live.filter((_, i) => i !== h);
@@ -562,6 +633,8 @@ export function validateFit(snapshot: Snapshot): FitValidation {
     const list = byCategory.get(key);
     const adj = list !== undefined ? median(list) * (list.length / (list.length + FIT_SHRINK_K)) : 0;
     const pred = Math.pow(10, a + b * Math.log10(held.tvl_usd) + adj);
+    preds.push(pred);
+    actuals.push(held.mcap_usd!);
     apes.push(Math.abs(pred - held.mcap_usd!) / held.mcap_usd!);
     logResiduals.push(Math.log10(held.mcap_usd!) - (a + b * Math.log10(held.tvl_usd) + adj));
     // radar-3 on the same training set: category median multiple (n >= 3) else global median.
@@ -583,6 +656,7 @@ export function validateFit(snapshot: Snapshot): FitValidation {
   return {
     loo_mdape_pct: round4(median(apes) * 100),
     loo_p75_ape_pct: round4(quantile(apes, 0.75) * 100),
+    loo_spearman: round4(spearmanRank(preds, actuals)),
     resid_p25: round4(quantile(logResiduals, 0.25)),
     resid_p75: round4(quantile(logResiduals, 0.75)),
     backtest_mdape_pct: backtest.mdape_pct,
@@ -730,8 +804,13 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
 const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
 
 /** The protocols the board ranks, most valuable first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
+export function buildBoard(
+  snapshot: Snapshot,
+  model: ModelConstants = MODEL,
+  computed?: { fit: LaunchFit; validation: FitValidation; growthMedians: { byCategory: Map<string, number>; global: number } },
+): BoardRow[] {
   const index = bySlug(snapshot.protocols);
+  const watchlistSet = new Set(snapshot.watchlist);
   const chosen = new Map<string, SnapshotProtocol>();
   for (const slug of snapshot.watchlist) {
     const p = index.get(slug);
@@ -751,9 +830,9 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
   for (const p of above) chosen.set(p.slug, p);
 
-  const fit = fitLaunchCurve(snapshot);
-  const validation = validateFit(snapshot);
-  const growthMedians = categoryGrowthMedians(snapshot);
+  const fit = computed?.fit ?? fitLaunchCurve(snapshot);
+  const validation = computed?.validation ?? validateFit(snapshot);
+  const growthMedians = computed?.growthMedians ?? categoryGrowthMedians(snapshot);
   const scored = [...chosen.values()].map((p) => {
     const v = impliedValue(p, snapshot.as_of, model, fit, growthMedians);
     return { p, ...v };
@@ -763,7 +842,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     const fees = totalFeesUsd(s.p, s.age);
     const share = s.implied > 0 ? fees / s.implied : 1;
     const rangeLow = Math.max(1, Math.round(s.implied * Math.pow(10, validation.resid_p25)));
-    const rangeHigh = Math.round(s.implied * Math.pow(10, validation.resid_p75));
+    const rangeHigh = Math.max(rangeLow, Math.round(s.implied * Math.pow(10, validation.resid_p75)));
     return {
       rank: i + 1,
       slug: s.p.slug,
@@ -777,7 +856,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       gecko_id: s.p.gecko_id,
       symbol: s.p.symbol,
       token_status: 'pre-token' as const,
-      on_watchlist: snapshot.watchlist.includes(s.p.slug),
+      on_watchlist: watchlistSet.has(s.p.slug),
       age_days: s.age,
       implied_value_usd: s.implied,
       model: {
@@ -794,6 +873,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
         age_days: s.age,
         range_low_usd: rangeLow,
         range_high_usd: rangeHigh,
+        farm_chain: farmChain(s.p),
         total_fees_usd: fees,
         breakeven_share: share,
         net_verdict: netVerdict(share),
@@ -813,67 +893,110 @@ export function stepText(step: FarmStep): string {
   return s;
 }
 
-/** The protocol's main chain, or a neutral phrase when it names none. */
-function mainChain(p: SnapshotProtocol): string {
-  return p.chains.length > 0 ? p.chains[0]! : 'its main chain';
+const LOW_FEE_CHAINS = new Set([
+  'base',
+  'arbitrum',
+  'optimism',
+  'polygon',
+  'binance',
+  'bsc',
+  'avalanche',
+  'linea',
+  'zksync',
+  'zksync era',
+  'scroll',
+  'blast',
+  'mantle',
+  'mode',
+  'ink',
+  'unichain',
+  'sonic',
+  'berachain',
+  'gnosis',
+  'celo',
+  'fantom',
+  'metis',
+  'starknet',
+  'taiko',
+  'zora',
+  'world chain',
+  'soneium',
+  'abstract',
+  'katana',
+  'monad',
+  'sui',
+  'aptos',
+  'ton',
+  'near',
+  'sei',
+  'injective',
+  'hyperliquid',
+  'plasma',
+  'corn',
+  'robinhood chain',
+]);
+
+/** One transaction's gas cost in dollars on `chain`. */
+export function chainGasUsd(chain: string): number {
+  const c = chain.trim().toLowerCase();
+  if (c === 'solana') return 0.1;
+  if (c === 'ethereum') return 5;
+  if (LOW_FEE_CHAINS.has(c)) return 1;
+  return 2;
 }
 
-/** What one transaction costs on the protocol's main chain, from its own chains field. */
+/** The bridge cost in dollars onto `chain`. */
+export function chainBridgeUsd(chain: string): number {
+  const c = chain.trim().toLowerCase();
+  if (c === 'solana') return 1;
+  if (c === 'ethereum') return 12;
+  if (LOW_FEE_CHAINS.has(c)) return 2;
+  return 3;
+}
+
+/** Pick the chain in `p.chains` minimizing bridge + 6x gas (stable order on ties), or 'its main chain'. */
+export function farmChain(p: SnapshotProtocol): string {
+  if (p.chains.length === 0) return 'its main chain';
+  let best = p.chains[0]!;
+  let bestCost = chainBridgeUsd(best) + chainGasUsd(best) * 6;
+  for (let i = 1; i < p.chains.length; i++) {
+    const c = p.chains[i]!;
+    const cost = chainBridgeUsd(c) + chainGasUsd(c) * 6;
+    if (cost < bestCost) {
+      best = c;
+      bestCost = cost;
+    }
+  }
+  return best;
+}
+
+/** The protocol's selected farm chain, or a neutral phrase when it names none. */
+function mainChain(p: SnapshotProtocol): string {
+  return farmChain(p);
+}
+
+/** What one transaction costs on the protocol's selected farm chain. */
 function gasNote(p: SnapshotProtocol): string {
-  const chain = (p.chains[0] ?? '').toLowerCase();
+  const chain = farmChain(p).toLowerCase();
   if (chain === 'solana') return 'under $0.10 of gas';
   if (gasUsd(p) === 1) return 'under $1 of gas';
   return `about $${gasUsd(p)} of gas`;
 }
 
-/** One transaction's cost in dollars on the protocol's main chain, from its own chains field. */
+/** One transaction's cost in dollars on the protocol's selected farm chain. */
 export function gasUsd(p: SnapshotProtocol): number {
-  const chain = (p.chains[0] ?? '').toLowerCase();
-  if (chain === 'ethereum') return 5;
-  if (chain === 'solana') return 0.1;
-  if (
-    chain === 'base' ||
-    chain === 'arbitrum' ||
-    chain === 'optimism' ||
-    chain === 'polygon' ||
-    chain === 'binance' ||
-    chain === 'avalanche' ||
-    chain === 'linea' ||
-    chain === 'zksync' ||
-    chain === 'scroll' ||
-    chain === 'blast'
-  ) {
-    return 1;
-  }
-  return 2;
+  return chainGasUsd(farmChain(p));
 }
 
-/** What bridging funds onto the protocol's main chain costs, from its own chains field. */
+/** What bridging funds onto the protocol's selected farm chain costs. */
 function bridgeNote(p: SnapshotProtocol): string {
-  if ((p.chains[0] ?? '').toLowerCase() === 'solana') return 'under $1 in bridge fees and gas';
+  if (farmChain(p).toLowerCase() === 'solana') return 'under $1 in bridge fees and gas';
   return `about $${bridgeUsd(p)} in bridge fees and gas`;
 }
 
-/** The bridge cost in dollars onto the protocol's main chain, from its own chains field. */
+/** The bridge cost in dollars onto the protocol's selected farm chain. */
 export function bridgeUsd(p: SnapshotProtocol): number {
-  const chain = (p.chains[0] ?? '').toLowerCase();
-  if (chain === 'ethereum') return 12;
-  if (chain === 'solana') return 1;
-  if (
-    chain === 'base' ||
-    chain === 'arbitrum' ||
-    chain === 'optimism' ||
-    chain === 'polygon' ||
-    chain === 'binance' ||
-    chain === 'avalanche' ||
-    chain === 'linea' ||
-    chain === 'zksync' ||
-    chain === 'scroll' ||
-    chain === 'blast'
-  ) {
-    return 2;
-  }
-  return 3;
+  return chainBridgeUsd(farmChain(p));
 }
 
 /**
@@ -1002,26 +1125,36 @@ function weeklyFor(p: SnapshotProtocol, capital: number): string {
   return `Do one qualifying action on ${name} each week worth about $${weekly}: a deposit, a swap, a vote or a claim, whatever the app offers.`;
 }
 
-/** A second leg inside the same protocol, on its second chain or its second feature. */
+/** A second leg inside the same protocol, on its cheapest other chain or its second feature. */
 function secondLegFor(p: SnapshotProtocol, capital: number): string {
   const c = (p.category ?? '').toLowerCase();
   const name = p.name;
-  const chain = mainChain(p);
+  const primary = farmChain(p);
   const second = Math.max(25, Math.round(capital / 2));
-  if (p.chains.length > 1) {
-    const other = p.chains[1]!;
-    return `Open the same kind of position with $${second} on ${other}, the protocol's second chain, so the farm is not tied to ${chain} alone.`;
+  const others = p.chains.filter((ch) => ch !== primary);
+  if (others.length > 0) {
+    let other = others[0]!;
+    let otherCost = chainBridgeUsd(other) + chainGasUsd(other) * 6;
+    for (let i = 1; i < others.length; i++) {
+      const ch = others[i]!;
+      const cost = chainBridgeUsd(ch) + chainGasUsd(ch) * 6;
+      if (cost < otherCost) {
+        other = ch;
+        otherCost = cost;
+      }
+    }
+    return `Open the same kind of position with $${second} on ${other}, another chain the protocol supports, so the farm is not tied to ${primary} alone.`;
   }
   if (c.includes('dex') || c.includes('farm')) {
-    return `Add $${second} of liquidity to a second pool on ${name} on ${chain}, in a different pair, so the farm is not tied to one pool.`;
+    return `Add $${second} of liquidity to a second pool on ${name} on ${primary}, in a different pair, so the farm is not tied to one pool.`;
   }
   if (c.includes('lend') || c.includes('cdp')) {
-    return `Supply $${second} of a second asset to ${name} on ${chain}, so the farm is not tied to one market.`;
+    return `Supply $${second} of a second asset to ${name} on ${primary}, so the farm is not tied to one market.`;
   }
   if (c.includes('curator') || c.includes('allocator') || c.includes('asset management')) {
-    return `Deposit $${second} into a second ${name} vault on ${chain}, in a different strategy, so the farm is not tied to one curator.`;
+    return `Deposit $${second} into a second ${name} vault on ${primary}, in a different strategy, so the farm is not tied to one curator.`;
   }
-  return `Use a second feature of ${name} on ${chain} with about $${second}: a swap, a vote or a claim the app offers.`;
+  return `Use a second feature of ${name} on ${primary} with about $${second}: a swap, a vote or a claim the app offers.`;
 }
 
 /** How to unwind, in the order that does not strand funds, shaped by the category. */
@@ -1076,9 +1209,14 @@ export function farmSteps(p: SnapshotProtocol, age: number | null, implied: numb
   const fees = totalFeesUsd(p, age);
   const share = implied > 0 ? fees / implied : 1;
   const verdict = netVerdict(share);
+  const cat = (p.category ?? '').toLowerCase();
+  const isBridge = cat.includes('bridge') || cat.includes('cross chain');
+  const step1Text = isBridge
+    ? `Open a fresh wallet holding only the funds you plan to farm, and prepare $${capital} of USDC on a source chain to bridge onto ${chain} through ${p.name}.`
+    : `Open a fresh wallet that holds only the funds you plan to farm, and move $${capital} of USDC onto ${chain} through its official bridge, to farm ${p.name}.`;
   const steps = [
     {
-      text: `Open a fresh wallet that holds only the funds you plan to farm, and move $${capital} of USDC onto ${chain} through its official bridge, to farm ${p.name}.`,
+      text: step1Text,
       cost: `${bridge}, plus ${gas} for the first transaction`,
       time: '20 to 30 minutes',
     },
@@ -1132,7 +1270,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null, implied: numb
 export function liveRows(snapshot: Snapshot): LiveRow[] {
   return snapshot.protocols
     .filter((p) => !isPreToken(p) && p.category !== 'CEX')
-    .sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || b.tvl_usd - a.tvl_usd)
+    .sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0))
     .slice(0, LIVE_LIMIT)
     .map((p) => ({
       slug: p.slug,
@@ -1171,6 +1309,7 @@ export function radarRow(row: BoardRow): RadarRow {
     breadth_multiplier: row.model.breadth_multiplier,
     range_low_usd: row.model.range_low_usd,
     range_high_usd: row.model.range_high_usd,
+    farm_chain: row.model.farm_chain,
     total_fees_usd: row.model.total_fees_usd,
     breakeven_share: row.model.breakeven_share,
     net_verdict: row.model.net_verdict,
@@ -1180,13 +1319,13 @@ export function radarRow(row: BoardRow): RadarRow {
 
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const board = buildBoard(snapshot, model);
-  const live = liveRows(snapshot);
-  const early = board.filter((r) => !r.on_watchlist).length;
-  const multiples = categoryMultiples(snapshot, model);
   const growthMedians = categoryGrowthMedians(snapshot);
   const fit = fitLaunchCurve(snapshot);
   const validation = validateFit(snapshot);
+  const board = buildBoard(snapshot, model, { fit, validation, growthMedians });
+  const live = liveRows(snapshot);
+  const early = board.filter((r) => !r.on_watchlist).length;
+  const multiples = categoryMultiples(snapshot, model);
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -1197,7 +1336,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     board_size: board.length,
     early_size: early,
     live_size: live.length,
-    multiples: [...multiples.byCategory.values()].sort((a, b) => b.median - a.median || (a.category < b.category ? -1 : 1)),
+    multiples: [...multiples.byCategory.values()].sort((a, b) => b.median - a.median || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0)),
     global_multiple: multiples.global,
     global_growth_median: growthMedians.global,
     fit,

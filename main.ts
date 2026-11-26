@@ -17,7 +17,7 @@
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
@@ -33,10 +33,21 @@ const SHOT_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
 
 /** The value of `--name <value>` (or `--name=<value>`), else `fallback`. */
 function flag(name: string, fallback: string): string {
-  const at = process.argv.indexOf(`--${name}`);
-  if (at >= 0 && at + 1 < process.argv.length) return process.argv[at + 1]!;
-  const glued = process.argv.find((a) => a.startsWith(`--${name}=`));
-  return glued === undefined ? fallback : glued.slice(name.length + 3);
+  const key = `--${name}`;
+  const at = process.argv.indexOf(key);
+  if (at >= 0) {
+    if (at + 1 >= process.argv.length || process.argv[at + 1]!.startsWith('--')) {
+      fail(`${key} requires a value`);
+    }
+    return process.argv[at + 1]!;
+  }
+  const glued = process.argv.find((a) => a.startsWith(`${key}=`));
+  if (glued !== undefined) {
+    const value = glued.slice(key.length + 1);
+    if (value.length === 0) fail(`${key} requires a value`);
+    return value;
+  }
+  return fallback;
 }
 
 /** Fail with a message on stderr and a non-zero exit. */
@@ -46,8 +57,8 @@ function fail(message: string): never {
 }
 
 const inputArg = flag('input', '/input');
-const inputFile = inputArg.endsWith('.json') ? inputArg : join(inputArg, 'snapshot.json');
-if (!existsSync(inputFile)) {
+const inputFile = existsSync(inputArg) && statSync(inputArg).isDirectory() ? join(inputArg, 'snapshot.json') : inputArg;
+if (!existsSync(inputFile) || !statSync(inputFile).isFile()) {
   fail(`no snapshot at ${inputFile}: pass --input <snapshot.json|directory> or mount the sealed /input`);
 }
 const outDir = flag('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
@@ -64,9 +75,11 @@ writeFileSync(join(outDir, 'data.js'), dataScript(radar));
 /** Copy a directory's regular files into `to`, skipping names that start with a dot. */
 function copyDir(from: string, to: string): string[] {
   if (!existsSync(from)) return [];
+  rmSync(to, { recursive: true, force: true });
   mkdirSync(to, { recursive: true });
   const copied: string[] = [];
-  for (const name of readdirSync(from)) {
+  const names = readdirSync(from).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  for (const name of names) {
     if (name.startsWith('.')) continue;
     const path = join(from, name);
     if (!statSync(path).isFile()) continue;
