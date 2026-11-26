@@ -13,6 +13,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -400,8 +401,237 @@ function removeDirSafe(dir: string): void {
   }
 }
 
+/** Minimal CDP JSON-RPC client over Node's built-in WebSocket. */
+class CdpClient {
+  private readonly ws: WebSocket;
+  private nextId = 1;
+  private readonly pending = new Map<
+    number,
+    { resolve: (value: unknown) => void; reject: (err: Error) => void }
+  >();
+  private readonly eventWaiters = new Map<string, Array<() => void>>();
+
+  private constructor(ws: WebSocket) {
+    this.ws = ws;
+    ws.addEventListener('message', (event) => {
+      let msg: { id?: number; method?: string; result?: unknown; error?: { message?: string } };
+      try {
+        msg = JSON.parse(String(event.data));
+      } catch {
+        return;
+      }
+      if (typeof msg.id === 'number') {
+        const entry = this.pending.get(msg.id);
+        if (!entry) return;
+        this.pending.delete(msg.id);
+        if (msg.error) entry.reject(new Error(msg.error.message ?? 'CDP error'));
+        else entry.resolve(msg.result);
+      } else if (typeof msg.method === 'string') {
+        const waiters = this.eventWaiters.get(msg.method);
+        if (waiters && waiters.length > 0) {
+          this.eventWaiters.delete(msg.method);
+          for (const w of waiters) w();
+        }
+      }
+    });
+    ws.addEventListener('close', () => {
+      for (const [, entry] of this.pending) {
+        entry.reject(new Error('CDP socket closed'));
+      }
+      this.pending.clear();
+    });
+  }
+
+  static async connect(wsUrl: string): Promise<CdpClient> {
+    return await new Promise<CdpClient>((resolveConnect, rejectConnect) => {
+      const ws = new WebSocket(wsUrl);
+      const onOpen = () => {
+        ws.removeEventListener('error', onError);
+        resolveConnect(new CdpClient(ws));
+      };
+      const onError = () => {
+        ws.removeEventListener('open', onOpen);
+        rejectConnect(new Error('failed to connect to CDP WebSocket'));
+      };
+      ws.addEventListener('open', onOpen, { once: true });
+      ws.addEventListener('error', onError, { once: true });
+    });
+  }
+
+  send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+    const id = this.nextId++;
+    return new Promise<T>((resolveCmd, rejectCmd) => {
+      this.pending.set(id, {
+        resolve: (value) => resolveCmd(value as T),
+        reject: rejectCmd,
+      });
+      this.ws.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  waitForEvent(method: string, timeoutMs = 15_000): Promise<void> {
+    return new Promise<void>((resolveEvent, rejectEvent) => {
+      const timer = setTimeout(() => {
+        rejectEvent(new Error(`timed out waiting for CDP event ${method}`));
+      }, timeoutMs);
+      const list = this.eventWaiters.get(method) ?? [];
+      list.push(() => {
+        clearTimeout(timer);
+        resolveEvent();
+      });
+      this.eventWaiters.set(method, list);
+    });
+  }
+
+  close(): void {
+    try {
+      this.ws.close();
+    } catch {
+      // Ignore close errors.
+    }
+  }
+}
+
+/**
+ * Capture a narrow/mobile viewport via CDP Emulation.setDeviceMetricsOverride + Page.captureScreenshot.
+ * Win32 enforces a ~500px minimum window width on headless --window-size=390,844 --screenshot,
+ * which otherwise lays out at ~500px and crops the bitmap to 390px.
+ */
+async function captureOneViaCdp(
+  browserPath: string,
+  target: CaptureTarget,
+  outPath: string,
+): Promise<void> {
+  if (typeof WebSocket !== 'function' || typeof fetch !== 'function') {
+    throw new Error('CDP requires global WebSocket and fetch');
+  }
+
+  const userDataDir = mkdtempSync(join(tmpdir(), 'token-radar-chrome-'));
+  let child: ReturnType<typeof spawn> | null = null;
+  let cdp: CdpClient | null = null;
+  let exited = false;
+
+  try {
+    const args = [
+      '--headless=new',
+      '--disable-gpu',
+      '--hide-scrollbars',
+      '--force-device-scale-factor=1',
+      `--window-size=${target.width},${target.height}`,
+      '--remote-debugging-port=0',
+      `--user-data-dir=${userDataDir}`,
+      'about:blank',
+    ];
+    child = spawn(browserPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = child;
+    const closePromise = new Promise<void>((resolveExit) => {
+      proc.once('close', () => {
+        exited = true;
+        resolveExit();
+      });
+    });
+
+    const devToolsPort = await new Promise<number>((resolvePort, rejectPort) => {
+      let stderrBuf = '';
+      const timer = setTimeout(() => {
+        rejectPort(new Error('timed out waiting for browser DevTools port'));
+      }, 15_000);
+
+      const onData = (chunk: Buffer) => {
+        stderrBuf += chunk.toString('utf8');
+        const match = stderrBuf.match(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//);
+        if (match) {
+          clearTimeout(timer);
+          proc.stderr?.off('data', onData);
+          resolvePort(Number.parseInt(match[1]!, 10));
+        }
+      };
+      proc.stderr?.on('data', onData);
+      proc.once('error', (err) => {
+        clearTimeout(timer);
+        rejectPort(err);
+      });
+      proc.once('close', (code) => {
+        clearTimeout(timer);
+        rejectPort(new Error(`browser exited (${code ?? 'null'}) before opening DevTools`));
+      });
+    });
+
+    let pageWsUrl: string | undefined;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const resp = await fetch(`http://127.0.0.1:${devToolsPort}/json/list`);
+      if (resp.ok) {
+        const targets = (await resp.json()) as Array<{ type?: string; webSocketDebuggerUrl?: string }>;
+        const page = targets.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+        if (page?.webSocketDebuggerUrl) {
+          pageWsUrl = page.webSocketDebuggerUrl;
+          break;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (!pageWsUrl) throw new Error('could not find CDP page target');
+
+    cdp = await CdpClient.connect(pageWsUrl);
+    await cdp.send('Page.enable');
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: target.width,
+      height: target.height,
+      deviceScaleFactor: 1,
+      mobile: target.width < 520,
+    });
+    try {
+      await cdp.send('Emulation.setScrollbarsHidden', { hidden: true });
+    } catch {
+      // Optional on older Chromium builds; --hide-scrollbars is already set.
+    }
+
+    const loaded = cdp.waitForEvent('Page.loadEventFired');
+    await cdp.send('Page.navigate', { url: target.url });
+    await loaded;
+    await cdp.send('Runtime.evaluate', {
+      expression: 'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))',
+      awaitPromise: true,
+    });
+
+    const shot = await cdp.send<{ data: string }>('Page.captureScreenshot', {
+      format: 'png',
+      clip: { x: 0, y: 0, width: target.width, height: target.height, scale: 1 },
+    });
+    writeFileSync(outPath, Buffer.from(shot.data, 'base64'));
+
+    try {
+      await cdp.send('Browser.close');
+    } catch {
+      // Ignore if Browser.close is rejected on a page target; finally kills the process.
+    }
+    await Promise.race([closePromise, new Promise((r) => setTimeout(r, 1_500))]);
+  } finally {
+    cdp?.close();
+    if (child && !exited) {
+      try {
+        child.kill();
+      } catch {
+        // Ignore kill errors.
+      }
+      await new Promise<void>((resolveWait) => {
+        const t = setTimeout(resolveWait, 1_500);
+        child!.once('close', () => {
+          clearTimeout(t);
+          resolveWait();
+        });
+      });
+    }
+    removeDirSafe(userDataDir);
+  }
+}
+
 /** Run headless Chrome/Edge asynchronously so the in-process HTTP server can respond. */
-async function captureOne(browserPath: string, target: CaptureTarget, outPath: string): Promise<void> {
+async function captureOneCli(
+  browserPath: string,
+  target: CaptureTarget,
+  outPath: string,
+): Promise<void> {
   const userDataDir = mkdtempSync(join(tmpdir(), 'token-radar-chrome-'));
   try {
     const args = [
@@ -452,6 +682,19 @@ async function captureOne(browserPath: string, target: CaptureTarget, outPath: s
   } finally {
     removeDirSafe(userDataDir);
   }
+}
+
+/** Capture one screenshot, using CDP device emulation for narrow viewports (<520px). */
+async function captureOne(browserPath: string, target: CaptureTarget, outPath: string): Promise<void> {
+  if (target.width < 520) {
+    try {
+      await captureOneViaCdp(browserPath, target, outPath);
+      return;
+    } catch {
+      // Fall back to CLI --screenshot if CDP/loopback is unavailable.
+    }
+  }
+  await captureOneCli(browserPath, target, outPath);
 }
 
 /** Validate PNG magic bytes, IHDR dimensions, and SHOT_CAP byte limit. */
