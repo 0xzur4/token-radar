@@ -45,7 +45,7 @@
     var n = ns ? document.createElementNS(ns, tag) : document.createElement(tag);
     if (attrs) Object.keys(attrs).forEach(function (k) {
       var v = attrs[k];
-      if (k === 'class') n.className = v;
+      if (k === 'class' && !ns) n.className = v;
       else if (k === 'text') n.textContent = v;
       else if (k.slice(0, 2) === 'on') n.addEventListener(k.slice(2), v);
       else if (v !== null && v !== undefined && v !== false) n.setAttribute(k, v === true ? '' : String(v));
